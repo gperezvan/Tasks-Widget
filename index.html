@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tasks Productivity</title>
+  <style>
+    :root {
+      /* Series colors: categorical slots 1-2 of the dataviz palette, validated in both modes. */
+      --bg: #fcfcfb; --fg: #0b0b0b; --muted: #52514e; --border: #e2e1dc;
+      --new: #2a78d6; --done: #eb6834;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1a1a19; --fg: #f0efec; --muted: #c3c2b7; --border: #3a3a37;
+        --new: #3987e5; --done: #d95926;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 12px 16px; background: var(--bg); color: var(--fg);
+           font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .tiles { display: flex; gap: 8px; margin-bottom: 10px; }
+    .tile { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }
+    .tile .label { color: var(--muted); font-size: 12px; }
+    .tile .value { font-size: 20px; font-weight: 600; }
+    .chart { position: relative; height: 260px; }
+    .chart.rate { height: 140px; margin-top: 12px; }
+    h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 12px 0 4px; }
+    details { margin-top: 12px; }
+    table { border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+    th, td { padding: 2px 10px 2px 0; text-align: right; }
+    th:first-child, td:first-child { text-align: left; }
+    /* Compact: tiles on top, chart fills whatever height the widget gives the page. */
+    body.compact { padding: 6px 8px; height: 100vh; }
+    body.compact #app { display: flex; flex-direction: column; height: 100%; }
+    body.compact .chart { flex: 1; height: auto; min-height: 100px; }
+    body.compact .tile .value { font-size: 16px; }
+    form { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+    fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; margin: 0; width: 100%; }
+    legend { color: var(--muted); font-size: 12px; }
+    label { white-space: nowrap; }
+    select, input, button { font: inherit; color: var(--fg); background: var(--bg);
+                            border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; }
+    .note { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    #status { color: var(--muted); padding: 24px 0; text-align: center; }
+    body.loading #app { display: none; }
+  </style>
+</head>
+<body class="loading">
+  <div id="status">Loading…</div>
+  <div id="app">
+  <div class="tiles">
+    <div class="tile"><div class="label">New</div><div class="value" id="t-new"></div></div>
+    <div class="tile"><div class="label">Done</div><div class="value" id="t-done"></div></div>
+    <div class="tile"><div class="label">Done ÷ New</div><div class="value" id="t-rate"></div></div>
+  </div>
+  <div class="chart"><canvas id="chart"></canvas></div>
+  <div id="full-only">
+    <h2>Done ÷ New per day</h2>
+    <div class="chart rate"><canvas id="rate-chart"></canvas></div>
+    <details>
+      <summary>Table</summary>
+      <table><thead><tr><th>Day</th><th>New</th><th>Done</th><th>Done ÷ New</th></tr></thead>
+        <tbody id="table"></tbody></table>
+    </details>
+  </div>
+
+  <form id="controls" method="get">
+    <input type="hidden" name="key">
+    <label>Range
+      <select name="days" id="days"></select>
+    </label>
+    <label>From <input type="date" name="start" id="start"></label>
+    <label>To <input type="date" name="end" id="end"></label>
+    <button type="submit">Update</button>
+    <fieldset><legend>Task lists (none checked = all)</legend><span id="lists"></span></fieldset>
+  </form>
+  <div class="note" id="note"></div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script>
+    // Page params are forwarded to the Apps Script JSON API (key, days, start, end, list).
+    var params = new URLSearchParams(location.search);
+    var statusEl = document.getElementById('status');
+    if (!params.get('key')) {
+      statusEl.textContent = 'Add ?key=<your ACCESS_KEY> to the URL.';
+    } else {
+      fetch(window.API_URL + '?' + params.toString())
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          if (data.error) throw new Error(data.error === 'forbidden' ? 'Wrong key.' : data.error);
+          data.compact = params.get('compact') === '1';
+          data.key = params.get('key');
+          document.body.classList.remove('loading');
+          render(data);
+        })
+        .catch(function (err) { statusEl.textContent = 'Could not load data: ' + err.message; });
+    }
+
+    function render(DATA) {
+      statusEl.remove();
+      var stats = DATA.stats;
+      var pct = function (r) { return r === null ? '–' : Math.round(r * 100) + '%'; };
+      document.getElementById('t-new').textContent = stats.totals.new;
+      document.getElementById('t-done').textContent = stats.totals.done;
+      document.getElementById('t-rate').textContent = pct(stats.totals.rate);
+
+      if (DATA.compact) {
+        document.body.classList.add('compact');
+        document.getElementById('controls').remove();
+        document.getElementById('full-only').remove();
+      } else {
+        buildControls();
+      }
+      if (stats.totals.undatedDone > 0 && !DATA.compact) {
+        document.getElementById('note').textContent = stats.totals.undatedDone +
+          ' completed task(s) had no due date: counted in Done, not in New.';
+      }
+
+      var css = getComputedStyle(document.documentElement);
+      var color = function (name) { return css.getPropertyValue(name).trim(); };
+      Chart.defaults.color = color('--muted');
+      Chart.defaults.borderColor = color('--border');
+
+      var labels = stats.days.map(function (d) { return d.date.slice(5); });
+      // Thin bars with rounded tops; the surface-colored border leaves a 2px gap between New and Done.
+      var bar = function (label, key, fill) {
+        return { label: label, data: stats.days.map(function (d) { return d[key]; }),
+                 backgroundColor: fill, borderColor: color('--bg'), borderWidth: { left: 1, right: 1 },
+                 borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 18 };
+      };
+      new Chart(document.getElementById('chart'), {
+        type: 'bar',
+        data: { labels: labels, datasets: [bar('New', 'new', color('--new')), bar('Done', 'done', color('--done'))] },
+        options: {
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { position: 'top', align: 'start',
+                      labels: { boxWidth: 10, boxHeight: 10, color: color('--fg') } },
+          },
+          scales: {
+            y: { beginAtZero: true, ticks: { precision: 0 } },
+            x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true } },
+          },
+        },
+      });
+
+      // Completion rate is a different unit, so it gets its own chart instead of a second y-axis.
+      if (!DATA.compact) {
+        new Chart(document.getElementById('rate-chart'), {
+          type: 'line',
+          data: { labels: labels, datasets: [{ label: 'Done ÷ New',
+            data: stats.days.map(function (d) { return d.rate === null ? null : Math.round(d.rate * 100); }),
+            borderColor: color('--new'), backgroundColor: color('--new'),
+            borderWidth: 2, pointRadius: 4, pointHoverRadius: 6, spanGaps: true }] },
+          options: {
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: { legend: { display: false },
+                       tooltip: { callbacks: { label: function (ctx) { return ctx.parsed.y + '%'; } } } },
+            scales: {
+              y: { beginAtZero: true, suggestedMax: 100, ticks: { callback: function (v) { return v + '%'; } } },
+              x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true } },
+            },
+          },
+        });
+        var tbody = document.getElementById('table');
+        stats.days.forEach(function (d) {
+          var tr = tbody.insertRow();
+          [d.date, d.new, d.done, pct(d.rate)].forEach(function (v) { tr.insertCell().textContent = v; });
+        });
+      }
+
+      function buildControls() {
+        var form = document.getElementById('controls');
+        form.elements.key.value = DATA.key;
+
+        var days = document.getElementById('days');
+        DATA.presets.forEach(function (n) { days.add(new Option('Last ' + n + ' days', n)); });
+        days.add(new Option('Custom', ''));
+        days.value = DATA.range.days ? String(DATA.range.days) : '';
+        document.getElementById('start').value = DATA.range.start;
+        document.getElementById('end').value = DATA.range.end;
+
+        var box = document.getElementById('lists');
+        DATA.lists.forEach(function (l) {
+          var label = document.createElement('label');
+          var cb = document.createElement('input');
+          cb.type = 'checkbox'; cb.name = 'list'; cb.value = l.id;
+          cb.checked = DATA.selectedIds.indexOf(l.id) !== -1;
+          label.appendChild(cb);
+          label.appendChild(document.createTextNode(' ' + l.title + '  '));
+          box.appendChild(label);
+        });
+
+        // Send either the preset or the custom dates, not both.
+        form.addEventListener('submit', function () {
+          var custom = days.value === '';
+          days.disabled = custom;
+          form.elements.start.disabled = !custom;
+          form.elements.end.disabled = !custom;
+        });
+      }
+    }
+  </script>
+</body>
+</html>
